@@ -1,51 +1,43 @@
 #include <Arduino.h>
+#include <DHT.h>
 
-// 定義LED燈的GPIO腳位
-const int redPin = D1;    // 紅燈
-const int yellowPin = D2; // 黃燈
-const int greenPin = D3;  // 綠燈
+// 定義 DHT11 感測器的腳位和類型
+#define DHTPIN D7      // DHT11 連接到 D7
+#define DHTTYPE DHT11  // 使用 DHT11 感測器
+
+// 初始化 DHT 感測器
+DHT dht(DHTPIN, DHTTYPE);
 
 void setup() {
-  // 初始化 Serial 通訊
+  // 初始化序列埠通訊
   Serial.begin(115200);
+  Serial.println("DHT11 溫濕度感測器讀取開始");
 
-  // 設定GPIO腳位為輸出模式
-  pinMode(redPin, OUTPUT);
-  pinMode(yellowPin, OUTPUT);
-  pinMode(greenPin, OUTPUT);
-
-  // 顯示啟動訊息
-  Serial.println("交通燈模擬啟動");
+  // 啟動 DHT 感測器
+  dht.begin();
 }
 
 void loop() {
-  // 紅燈亮 5 秒
-  digitalWrite(redPin, HIGH);
-  digitalWrite(yellowPin, LOW);
-  digitalWrite(greenPin, LOW);
-  Serial.println("紅燈亮");
-  delay(5000);
+  // 讀取濕度
+  float humidity = dht.readHumidity();
 
-  // 綠燈亮 5 秒
-  digitalWrite(redPin, LOW);
-  digitalWrite(yellowPin, LOW);
-  digitalWrite(greenPin, HIGH);
-  Serial.println("綠燈亮");
-  delay(5000);
+  // 讀取溫度（攝氏）
+  float temperature = dht.readTemperature();
 
-  // 綠燈閃爍 5 次
-  Serial.println("綠燈閃");
-  for (int i = 0; i < 5; i++) {
-    digitalWrite(greenPin, LOW);
-    delay(500); // 綠燈滅 0.5 秒
-    digitalWrite(greenPin, HIGH);
-    delay(500); // 綠燈亮 0.5 秒
+  // 檢查是否讀取失敗
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("讀取 DHT11 數據失敗！");
+    delay(2000); // 等待 2 秒後重試
+    return;
   }
 
-  // 黃燈亮 3 秒
-  digitalWrite(redPin, LOW);
-  digitalWrite(yellowPin, HIGH);
-  digitalWrite(greenPin, LOW);
-  Serial.println("黃燈亮");
-  delay(3000);
+  // 在序列埠監控器中顯示溫濕度數值
+  Serial.print("濕度: ");
+  Serial.print(humidity);
+  Serial.print("%  溫度: ");
+  Serial.print(temperature);
+  Serial.println("°C");
+
+  // 延遲 2 秒，避免過多輸出
+  delay(2000);
 }

@@ -3,135 +3,70 @@
 #include <BLEUtils.h>
 #include <BLEServer.h>
 
-#define M1_IN1 1
-#define M1_IN2 2
-#define M2_IN1 3
-#define M2_IN2 4
+#define LED_GPIO 8  // 確認你的板載 LED 是接在 GPIO 8
 
-void forward();
-void backward();
-void turnLeft();
-void turnRight();
-void stopMotors();
-
-// BLE UUIDs
-#define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
-#define CMD_CHARACTERISTIC_UUID "abcdefab-1234-1234-1234-abcdefabcdef"  // for write
-#define STATUS_CHARACTERISTIC_UUID "abcdefab-5678-5678-5678-abcdefabcdef" // for notify
+// BLE UUIDs (可自訂，但目前是示範用)
+#define SERVICE_UUID               "12345678-1234-1234-1234-1234567890ab"
+#define CMD_CHARACTERISTIC_UUID    "abcdefab-1234-1234-1234-abcdefabcdef"
+#define STATUS_CHARACTERISTIC_UUID "abcdefab-5678-5678-5678-abcdefabcdef"
 
 BLECharacteristic *pStatusChar;
+char lastCommand = 'S';  // 預設關閉 LED
 
-void sendStatus(String status) {
-  Serial.println("[BLE] Notifying: " + status);
-  pStatusChar->setValue(status.c_str());
-  pStatusChar->notify();
+// 狀態回報
+void sendStatus(const String &msg) {
+  Serial.println("[BLE] Status: " + msg);
+  if (pStatusChar) {
+    pStatusChar->setValue(msg.c_str());
+    pStatusChar->notify();
+  }
 }
 
-// BLE write callback
-class MyCallbacks: public BLECharacteristicCallbacks {
+// BLE 指令回調處理
+class MyCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
-    std::string command = pCharacteristic->getValue();
+    std::string value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      lastCommand = toupper(value[0]);  // ← 儲存為大寫
 
-    if (command.length() > 0) {
-      char c = toupper(command[0]);
-      Serial.print("[BLE] Received command: ");
-      Serial.println(c);
+      Serial.print("[BLE] Received: ");
+      Serial.println(lastCommand);
 
-      switch (c) {
+      switch (lastCommand) {
         case 'F':
-          forward();
-          sendStatus("Forward");
-          break;
-        case 'B':
-          backward();
-          sendStatus("Backward");
-          break;
-        case 'L':
-          turnLeft();
-          sendStatus("Left");
-          break;
-        case 'R':
-          turnRight();
-          sendStatus("Right");
+          sendStatus("LED ON");
           break;
         case 'S':
-          stopMotors();
-          sendStatus("Stop");
+          sendStatus("LED OFF");
           break;
         default:
-          Serial.println("[BLE] Unknown command. Stopping.");
-          stopMotors();
-          sendStatus("Unknown");
+          sendStatus("LED Blinking");
           break;
       }
     }
   }
 };
 
-// Motor control
-void forward() {
-  Serial.println("[MOTOR] Moving Forward");
-  digitalWrite(M1_IN1, HIGH);
-  digitalWrite(M1_IN2, LOW);
-  digitalWrite(M2_IN1, HIGH);
-  digitalWrite(M2_IN2, LOW);
-}
-
-void backward() {
-  Serial.println("[MOTOR] Moving Backward");
-  digitalWrite(M1_IN1, LOW);
-  digitalWrite(M1_IN2, HIGH);
-  digitalWrite(M2_IN1, LOW);
-  digitalWrite(M2_IN2, HIGH);
-}
-
-void turnLeft() {
-  Serial.println("[MOTOR] Turning Left");
-  digitalWrite(M1_IN1, LOW);
-  digitalWrite(M1_IN2, HIGH);
-  digitalWrite(M2_IN1, HIGH);
-  digitalWrite(M2_IN2, LOW);
-}
-
-void turnRight() {
-  Serial.println("[MOTOR] Turning Right");
-  digitalWrite(M1_IN1, HIGH);
-  digitalWrite(M1_IN2, LOW);
-  digitalWrite(M2_IN1, LOW);
-  digitalWrite(M2_IN2, HIGH);
-}
-
-void stopMotors() {
-  Serial.println("[MOTOR] Stopped");
-  digitalWrite(M1_IN1, LOW);
-  digitalWrite(M1_IN2, LOW);
-  digitalWrite(M2_IN1, LOW);
-  digitalWrite(M2_IN2, LOW);
-}
-
 void setup() {
   Serial.begin(115200);
-  delay(2000);
-  Serial.println("[BOOT] Starting up...");
+  delay(1000);
+  Serial.println("[BOOT] ESP32-C3 BLE LED Controller");
 
-  pinMode(M1_IN1, OUTPUT);
-  pinMode(M1_IN2, OUTPUT);
-  pinMode(M2_IN1, OUTPUT);
-  pinMode(M2_IN2, OUTPUT);
-  stopMotors();
+  // 設定 LED 腳位
+  pinMode(LED_GPIO, OUTPUT);
+  digitalWrite(LED_GPIO, LOW);
 
-  BLEDevice::init("ESP32C3-Car");
+  // BLE 初始化
+  BLEDevice::init("ESP32C3-LED");
   BLEServer *pServer = BLEDevice::createServer();
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  // Write characteristic
   BLECharacteristic *pCmdChar = pService->createCharacteristic(
     CMD_CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_WRITE
   );
   pCmdChar->setCallbacks(new MyCallbacks());
 
-  // Notify characteristic
   pStatusChar = pService->createCharacteristic(
     STATUS_CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
@@ -140,10 +75,21 @@ void setup() {
   pService->start();
   pServer->getAdvertising()->start();
 
-  Serial.println("[BLE] BLE service ready. Waiting for commands...");
+  Serial.println("[BLE] Waiting for commands...");
   sendStatus("Ready");
 }
 
 void loop() {
-  // Empty loop — BLE handles all interaction
+  if (lastCommand == 'F') {
+    digitalWrite(LED_GPIO, LOW);
+    delay(100);
+  } else if (lastCommand == 'S') {
+    digitalWrite(LED_GPIO, HIGH);
+    delay(100);
+  } else {
+    digitalWrite(LED_GPIO, HIGH);
+    delay(250);
+    digitalWrite(LED_GPIO, LOW);
+    delay(250);
+  }
 }

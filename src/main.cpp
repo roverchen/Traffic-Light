@@ -1,43 +1,149 @@
 #include <Arduino.h>
-#include <DHT.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
 
-// 定義 DHT11 感測器的腳位和類型
-#define DHTPIN D7      // DHT11 連接到 D7
-#define DHTTYPE DHT11  // 使用 DHT11 感測器
+#define M1_IN1 1
+#define M1_IN2 2
+#define M2_IN1 3
+#define M2_IN2 4
 
-// 初始化 DHT 感測器
-DHT dht(DHTPIN, DHTTYPE);
+void forward();
+void backward();
+void turnLeft();
+void turnRight();
+void stopMotors();
+
+// BLE UUIDs
+#define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
+#define CMD_CHARACTERISTIC_UUID "abcdefab-1234-1234-1234-abcdefabcdef"  // for write
+#define STATUS_CHARACTERISTIC_UUID "abcdefab-5678-5678-5678-abcdefabcdef" // for notify
+
+BLECharacteristic *pStatusChar;
+
+void sendStatus(String status) {
+  Serial.println("[BLE] Notifying: " + status);
+  pStatusChar->setValue(status.c_str());
+  pStatusChar->notify();
+}
+
+// BLE write callback
+class MyCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string command = pCharacteristic->getValue();
+
+    if (command.length() > 0) {
+      char c = toupper(command[0]);
+      Serial.print("[BLE] Received command: ");
+      Serial.println(c);
+
+      switch (c) {
+        case 'F':
+          forward();
+          sendStatus("Forward");
+          break;
+        case 'B':
+          backward();
+          sendStatus("Backward");
+          break;
+        case 'L':
+          turnLeft();
+          sendStatus("Left");
+          break;
+        case 'R':
+          turnRight();
+          sendStatus("Right");
+          break;
+        case 'S':
+          stopMotors();
+          sendStatus("Stop");
+          break;
+        default:
+          Serial.println("[BLE] Unknown command. Stopping.");
+          stopMotors();
+          sendStatus("Unknown");
+          break;
+      }
+    }
+  }
+};
+
+// Motor control
+void forward() {
+  Serial.println("[MOTOR] Moving Forward");
+  digitalWrite(M1_IN1, HIGH);
+  digitalWrite(M1_IN2, LOW);
+  digitalWrite(M2_IN1, HIGH);
+  digitalWrite(M2_IN2, LOW);
+}
+
+void backward() {
+  Serial.println("[MOTOR] Moving Backward");
+  digitalWrite(M1_IN1, LOW);
+  digitalWrite(M1_IN2, HIGH);
+  digitalWrite(M2_IN1, LOW);
+  digitalWrite(M2_IN2, HIGH);
+}
+
+void turnLeft() {
+  Serial.println("[MOTOR] Turning Left");
+  digitalWrite(M1_IN1, LOW);
+  digitalWrite(M1_IN2, HIGH);
+  digitalWrite(M2_IN1, HIGH);
+  digitalWrite(M2_IN2, LOW);
+}
+
+void turnRight() {
+  Serial.println("[MOTOR] Turning Right");
+  digitalWrite(M1_IN1, HIGH);
+  digitalWrite(M1_IN2, LOW);
+  digitalWrite(M2_IN1, LOW);
+  digitalWrite(M2_IN2, HIGH);
+}
+
+void stopMotors() {
+  Serial.println("[MOTOR] Stopped");
+  digitalWrite(M1_IN1, LOW);
+  digitalWrite(M1_IN2, LOW);
+  digitalWrite(M2_IN1, LOW);
+  digitalWrite(M2_IN2, LOW);
+}
 
 void setup() {
-  // 初始化序列埠通訊
   Serial.begin(115200);
-  Serial.println("DHT11 溫濕度感測器讀取開始");
+  delay(2000);
+  Serial.println("[BOOT] Starting up...");
 
-  // 啟動 DHT 感測器
-  dht.begin();
+  pinMode(M1_IN1, OUTPUT);
+  pinMode(M1_IN2, OUTPUT);
+  pinMode(M2_IN1, OUTPUT);
+  pinMode(M2_IN2, OUTPUT);
+  stopMotors();
+
+  BLEDevice::init("ESP32C3-Car");
+  BLEServer *pServer = BLEDevice::createServer();
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Write characteristic
+  BLECharacteristic *pCmdChar = pService->createCharacteristic(
+    CMD_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  pCmdChar->setCallbacks(new MyCallbacks());
+
+  // Notify characteristic
+  pStatusChar = pService->createCharacteristic(
+    STATUS_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+
+  pService->start();
+  pServer->getAdvertising()->start();
+
+  Serial.println("[BLE] BLE service ready. Waiting for commands...");
+  sendStatus("Ready");
 }
 
 void loop() {
-  // 讀取濕度
-  float humidity = dht.readHumidity();
-
-  // 讀取溫度（攝氏）
-  float temperature = dht.readTemperature();
-
-  // 檢查是否讀取失敗
-  if (isnan(humidity) || isnan(temperature)) {
-    Serial.println("讀取 DHT11 數據失敗！");
-    delay(2000); // 等待 2 秒後重試
-    return;
-  }
-
-  // 在序列埠監控器中顯示溫濕度數值
-  Serial.print("濕度: ");
-  Serial.print(humidity);
-  Serial.print("%  溫度: ");
-  Serial.print(temperature);
-  Serial.println("°C");
-
-  // 延遲 2 秒，避免過多輸出
-  delay(2000);
+  // Empty loop — BLE handles all interaction
 }

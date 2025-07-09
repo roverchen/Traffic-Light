@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../../../Arduino/sketch_nov24a"
+		},
+		{
+			"name": "drums",
+			"path": "../../drums"
+		},
+		{
+			"name": "Traffic-Light",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}

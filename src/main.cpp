@@ -1,95 +1,75 @@
-#include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEServer.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <ESP32Servo.h>
 
-#define LED_GPIO 8  // 確認你的板載 LED 是接在 GPIO 8
+// --- SPI 腳位定義 (FSPI) ---
+#define SS_PIN    7
+#define RST_PIN   8
+#define SCK_PIN   4
+#define MOSI_PIN  6
+#define MISO_PIN  5
 
-// BLE UUIDs (可自訂，但目前是示範用)
-#define SERVICE_UUID               "12345678-1234-1234-1234-1234567890ab"
-#define CMD_CHARACTERISTIC_UUID    "abcdefab-1234-1234-1234-abcdefabcdef"
-#define STATUS_CHARACTERISTIC_UUID "abcdefab-5678-5678-5678-abcdefabcdef"
+SPIClass spiRFID(FSPI);
+MFRC522 rfid(SS_PIN, RST_PIN);
 
-BLECharacteristic *pStatusChar;
-char lastCommand = 'S';  // 預設關閉 LED
+// --- Servo 腳位 ---
+#define SERVO_PIN 9
+Servo myServo;
 
-// 狀態回報
-void sendStatus(const String &msg) {
-  Serial.println("[BLE] Status: " + msg);
-  if (pStatusChar) {
-    pStatusChar->setValue(msg.c_str());
-    pStatusChar->notify();
-  }
-}
-
-// BLE 指令回調處理
-class MyCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pCharacteristic) {
-    std::string value = pCharacteristic->getValue();
-    if (value.length() > 0) {
-      lastCommand = toupper(value[0]);  // ← 儲存為大寫
-
-      Serial.print("[BLE] Received: ");
-      Serial.println(lastCommand);
-
-      switch (lastCommand) {
-        case 'F':
-          sendStatus("LED ON");
-          break;
-        case 'S':
-          sendStatus("LED OFF");
-          break;
-        default:
-          sendStatus("LED Blinking");
-          break;
-      }
-    }
-  }
-};
+// --- 授權 UID ---
+// byte authorizedUID[4] = {0x1A, 0x2B, 0x3C, 0x4D};
+const byte authorizedUID[4] = {0x42, 0xDD, 0xB5, 0x01};  // ✅ 將這組設為授權卡
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("[BOOT] ESP32-C3 BLE LED Controller");
+  delay(2000);  // 等待序列埠穩定
+  Serial.println("🔧 初始化中...");
 
-  // 設定 LED 腳位
-  pinMode(LED_GPIO, OUTPUT);
-  digitalWrite(LED_GPIO, LOW);
+  // 初始化 SPI
+  spiRFID.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);  // 某些庫會用 default SPI
+  rfid.PCD_Init();
+  delay(50);
 
-  // BLE 初始化
-  BLEDevice::init("ESP32C3-LED");
-  BLEServer *pServer = BLEDevice::createServer();
-  BLEService *pService = pServer->createService(SERVICE_UUID);
+  byte version = rfid.PCD_ReadRegister(rfid.VersionReg);
+  Serial.printf("📦 RC522 版本號: 0x%02X\n", version);
+  if (version == 0x00 || version == 0xFF) {
+    Serial.println("❌ 無法讀取 RC522，請檢查接線與供電");
+    while (true);
+  }
 
-  BLECharacteristic *pCmdChar = pService->createCharacteristic(
-    CMD_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE
-  );
-  pCmdChar->setCallbacks(new MyCallbacks());
+  Serial.println("✅ RC522 初始化成功，請靠近卡片感應...");
 
-  pStatusChar = pService->createCharacteristic(
-    STATUS_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_NOTIFY
-  );
+  // 初始化伺服馬達
+  myServo.attach(SERVO_PIN);
+  myServo.write(0);  // 預設鎖定
+}
 
-  pService->start();
-  pServer->getAdvertising()->start();
-
-  Serial.println("[BLE] Waiting for commands...");
-  sendStatus("Ready");
+bool isAuthorized(byte *uid) {
+  for (byte i = 0; i < 4; i++) {
+    if (uid[i] != authorizedUID[i]) return false;
+  }
+  return true;
 }
 
 void loop() {
-  if (lastCommand == 'F') {
-    digitalWrite(LED_GPIO, LOW);
-    delay(100);
-  } else if (lastCommand == 'S') {
-    digitalWrite(LED_GPIO, HIGH);
-    delay(100);
-  } else {
-    digitalWrite(LED_GPIO, HIGH);
-    delay(250);
-    digitalWrite(LED_GPIO, LOW);
-    delay(250);
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+
+  Serial.print("📡 UID: ");
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    Serial.printf("%02X ", rfid.uid.uidByte[i]);
   }
+  Serial.println();
+
+  if (isAuthorized(rfid.uid.uidByte)) {
+    Serial.println("🔓 授權成功，開鎖中...");
+    myServo.write(90);  // 開鎖
+  } else {
+    Serial.println("🔒 未授權卡片，鎖定");
+    myServo.write(0);   // 鎖定
+  }
+
+  delay(3000);
+  rfid.PICC_HaltA();      // 停止與當前卡片通訊
+  rfid.PCD_StopCrypto1(); // 關閉加密
 }

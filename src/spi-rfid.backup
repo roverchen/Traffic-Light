@@ -1,0 +1,44 @@
+#include <SPI.h>
+#include <MFRC522.h>
+
+#define RST_PIN   8   // 接 RC522 的 RST
+#define SS_PIN    7   // 接 RC522 的 SDA
+
+#define SCK_PIN   4
+#define MOSI_PIN  6
+#define MISO_PIN  5
+
+SPIClass spiRFID(FSPI);
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+void setup() {
+  Serial.begin(115200);
+  delay(3000); // 等待 USB ready
+  Serial.println("✅ 開始初始化 RC522...");
+
+  spiRFID.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN); // 雙保險
+  rfid.PCD_Init();  // 初始化 RC522
+  delay(50);
+
+  byte version = rfid.PCD_ReadRegister(rfid.VersionReg);
+  Serial.printf("📦 RC522 版本號: 0x%02X\n", version);
+
+  if (version == 0x00 || version == 0xFF) {
+    Serial.println("❌ 無法讀取 RC522，請檢查接線與供電");
+    while (1);
+  }
+
+  Serial.println("✅ RC522 初始化完成，請將卡片靠近感應區...");
+}
+
+void loop() {
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+
+  Serial.print("📡 UID: ");
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    Serial.printf("%02X ", rfid.uid.uidByte[i]);
+  }
+  Serial.println();
+  delay(1000);
+}

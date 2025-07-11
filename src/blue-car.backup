@@ -1,0 +1,123 @@
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+
+// 馬達控制腳位定義
+#define IN1 1  // 左馬達
+#define IN2 2
+#define IN3 3  // 右馬達
+#define IN4 4
+
+// 板載 LED 腳位
+#define LED_PIN 8
+
+// 動作狀態定義
+enum MotionState { STOPPED, FORWARD, OTHER };
+MotionState currentState = STOPPED;
+
+unsigned long lastBlinkTime = 0;
+bool ledState = false;
+
+// === LED 狀態控制 ===
+void updateLED() {
+  unsigned long now = millis();
+
+  if (currentState == FORWARD) {
+    digitalWrite(LED_PIN, LOW); // 前進 → 關燈
+  } else if (currentState == STOPPED) {
+    digitalWrite(LED_PIN, HIGH); // 停止 → 亮燈
+  } else {
+    // 轉彎、後退 → 閃爍
+    if (now - lastBlinkTime >= 500) {
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState ? LOW : HIGH);
+      lastBlinkTime = now;
+    }
+  }
+}
+
+// === 馬達動作函式 ===
+void moveForward() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  // 左馬達前進
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);  // 右馬達前進
+  currentState = FORWARD;
+}
+
+void moveBackward() {
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); // 左馬達後退
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH); // 右馬達後退 (修正過)
+  currentState = OTHER;
+}
+
+void turnLeft() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);  // 左馬達後退
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);  // 右馬達前進
+  currentState = OTHER;
+}
+
+void turnRight() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  // 左馬達前進
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH); // 右馬達後退
+  currentState = OTHER;
+}
+
+void stopMotors() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+  currentState = STOPPED;
+}
+
+// === BLE UART 服務設定 ===
+NimBLECharacteristic* pCharacteristic;
+
+class BLEUARTCallback : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* pChar) override {
+    std::string cmd = pChar->getValue();
+    if (cmd.length() == 0) return;
+
+    char c = toupper(cmd[0]);  // 👉 支援大小寫
+    Serial.printf("🔵 Received: %c\n", c);
+
+    switch (c) {
+      case 'F': moveForward(); break;
+      case 'B': moveBackward(); break;
+      case 'L': turnLeft();    break;
+      case 'R': turnRight();   break;
+      case 'S': stopMotors();  break;
+    }
+  }
+};
+
+void setupBLE() {
+  NimBLEDevice::init("ESP32C3-Car");
+  NimBLEServer* pServer = NimBLEDevice::createServer();
+
+  NimBLEService* pService = pServer->createService("6E400001-B5A3-F393-E0A9-E50E24DCCA9E"); // UART
+  pCharacteristic = pService->createCharacteristic(
+    "6E400002-B5A3-F393-E0A9-E50E24DCCA9E",
+    NIMBLE_PROPERTY::WRITE
+  );
+
+  pCharacteristic->setCallbacks(new BLEUARTCallback());
+  pService->start();
+
+  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+  pAdvertising->start();
+
+  Serial.println("📶 BLE UART ready, device name: ESP32C3-Car");
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH); // 預設 STOP 狀態亮燈
+  stopMotors();
+
+  setupBLE();
+}
+
+void loop() {
+  updateLED();
+  delay(10);
+}

@@ -1,0 +1,104 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// LCD 初始化：位址為 0x27、螢幕為 16x2
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// LED 腳位
+#define RED_LED     2
+#define YELLOW_LED  3
+#define GREEN_LED   4
+#define BUTTON_PIN  5
+
+// 狀態與行人請求
+volatile bool pedestrianRequest = false;
+enum TrafficState { GREEN, YELLOW, RED };
+volatile TrafficState currentState = RED;
+
+// 前置宣告
+void IRAM_ATTR onPedestrianButtonPress();
+void showStatus(String label, int seconds, bool pedestrian);
+
+void setup() {
+  Wire.begin(6, 7);  // SDA = GPIO 6, SCL = GPIO 7
+  pinMode(RED_LED, OUTPUT);
+  pinMode(YELLOW_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("🚦 Traffic Light + LCD");
+
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), onPedestrianButtonPress, FALLING);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Traffic Light");
+  delay(1500);
+  lcd.clear();
+}
+
+void loop() {
+  // 🟢 綠燈
+  currentState = GREEN;
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(YELLOW_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+  Serial.println("🟢 Green Light");
+  showStatus("Green", 5, false);
+
+  // 🟡 黃燈
+  currentState = YELLOW;
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(YELLOW_LED, HIGH);
+  Serial.println("🟡 Yellow Light");
+  showStatus("Yellow", 2, false);
+
+  // 🔴 紅燈
+  currentState = RED;
+  digitalWrite(YELLOW_LED, LOW);
+  digitalWrite(RED_LED, HIGH);
+  Serial.println("🔴 Red Light");
+
+  if (pedestrianRequest) {
+    Serial.println("🚶 Pedestrian Wait (Extended)");
+    showStatus("Red", 8, true);
+    pedestrianRequest = false;
+  } else {
+    showStatus("Red", 5, false);
+  }
+}
+
+// 顯示交通燈與倒數秒數
+void showStatus(String label, int seconds, bool pedestrian) {
+  for (int i = seconds; i > 0; i--) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(label + " Light");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Time: " + String(i) + "s");
+
+    if (pedestrian) {
+      lcd.setCursor(10, 1);
+      lcd.print("*");
+    }
+
+    Serial.print(label);
+    Serial.print(": ");
+    Serial.print(i);
+    Serial.println("s");
+
+    delay(1000);
+  }
+}
+
+// 中斷函式：只在綠燈狀態接受請求
+void IRAM_ATTR onPedestrianButtonPress() {
+  if (currentState == GREEN) {
+    pedestrianRequest = true;
+  }
+}

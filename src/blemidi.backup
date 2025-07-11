@@ -1,0 +1,91 @@
+#include <Arduino.h>
+#include <BLEMidi.h>
+
+// ====== Button Setup ======
+const int buttonPins[] = {0, 1, 2, 3, 4, 5};  // D0 ~ D5
+const int midiNotes[] = {60, 62, 64, 65, 67, 69};  // Do ~ La (C4~A4)
+const int buttonCount = sizeof(buttonPins) / sizeof(buttonPins[0]);
+
+#define MODE_BUTTON 9    // D9 for switching modes
+
+bool melodyPlaying = false;
+
+// ====== Melody: 小蜜蜂 (MIDI Notes) ======
+int melody[] = {
+  64, 62, 60, 62, 64, 64, 64,
+  62, 62, 62, 64, 67, 67,
+  64, 62, 60, 62, 64, 64, 64,
+  62, 62, 64, 62, 60
+};
+
+int noteDurations[] = {
+  4, 4, 4, 4, 4, 4, 2,
+  4, 4, 2, 4, 4, 2,
+  4, 4, 4, 4, 4, 4, 2,
+  4, 4, 4, 4, 1
+};
+
+int melodyLength = sizeof(melody) / sizeof(melody[0]);
+
+void playBLEMelody() {
+  melodyPlaying = true;
+  Serial.println("🎵 Playing BLE MIDI melody: 小蜜蜂");
+
+  for (int i = 0; i < melodyLength; i++) {
+    int noteDuration = 1000 / noteDurations[i];
+
+    BLEMidiServer.noteOn(0, melody[i], 127);
+    delay(noteDuration);
+    BLEMidiServer.noteOff(0, melody[i], 127);
+
+    delay(noteDuration * 0.3);
+  }
+
+  melodyPlaying = false;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Initializing BLE MIDI...");
+  BLEMidiServer.begin("ESP32-MIDI");
+  Serial.println("Waiting for BLE MIDI connection...");
+
+  for (int i = 0; i < buttonCount; i++) {
+    pinMode(buttonPins[i], INPUT_PULLUP);
+  }
+
+  pinMode(MODE_BUTTON, INPUT_PULLUP);
+}
+
+void loop() {
+  if (!BLEMidiServer.isConnected()) {
+    delay(100);
+    return;
+  }
+
+  bool isMelodyMode = (digitalRead(MODE_BUTTON) == LOW);  // 按住 D9 為 melody 模式
+
+  if (isMelodyMode) {
+    // 自動播放「小蜜蜂」旋律
+    if (!melodyPlaying) {
+      playBLEMelody();
+    }
+
+  } else {
+    // 按鍵即時輸出 Do~La 音階
+    static bool keyState[buttonCount] = {false};
+
+    for (int i = 0; i < buttonCount; i++) {
+      bool pressed = digitalRead(buttonPins[i]) == LOW;
+      if (pressed && !keyState[i]) {
+        BLEMidiServer.noteOn(0, midiNotes[i], 127);
+        keyState[i] = true;
+      } else if (!pressed && keyState[i]) {
+        BLEMidiServer.noteOff(0, midiNotes[i], 127);
+        keyState[i] = false;
+      }
+    }
+  }
+
+  delay(10);
+}

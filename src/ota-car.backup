@@ -29,30 +29,27 @@ enum ControlMode {
 ControlMode currentControlMode = MANUAL_CONTROL; // 預設為手動控制模式
 
 // 馬達預設速度 (0-255，取決於 PWM_RESOLUTION)
+const int STRAIGHT_SPEED = 200; // 直行速度
+const int TURN_SPEED = 200;     // 轉向時較快的馬達速度 (用於原地轉向或大轉彎)
+const int TURN_SLOW_SPEED = 200; // 轉向時較慢的馬達速度 (用於微調)
+const int STOP_SPEED = 0;       // 停止速度
+/*
 const int STRAIGHT_SPEED = 250; // 直行速度
 const int TURN_SPEED = 200;     // 轉向時較快的馬達速度 (用於原地轉向或大轉彎)
 const int TURN_SLOW_SPEED = 150; // 轉向時較慢的馬達速度 (用於微調)
 const int STOP_SPEED = 0;       // 停止速度
-
+*/
 // 感測器閾值
 // 此值需要根據您的 TCRT5000 感測器和環境進行校準。
 // 假設讀數低於此閾值表示偵測到障礙物或深色線。
 const int OBSTACLE_THRESHOLD = 300; // 調整此值
 
 // 馬達控制腳位定義
-// !!! 重要：請務必根據您的實際接線，將這些 GPIO 號碼設定正確 !!!
-// 目前的變數值 (9, 10, 20, 21) 與您的註解 (D2, D3, D4, D5) 不符。
-// 如果 D2, D3, D4, D5 是您實際接線的 GPIO 號碼，則應改為 2, 3, 4, 5
-const int MOTOR_A_PWM_PIN = 1;  // 假設接到 TC1508A IN1
-const int MOTOR_A_DIR_PIN = 2; // 假設接到 TC1508A IN2
-const int MOTOR_B_PWM_PIN = 3; // 假設接到 TC1508A IN3
-const int MOTOR_B_DIR_PIN = 4; // 假設接到 TC1508A IN4
-
-// PWM 設定
-const int PWM_FREQ = 5000;      // PWM 頻率 (Hz)
-const int PWM_RESOLUTION = 8;   // PWM 解析度 (8 位元，即 0-255)
-const int MOTOR_A_PWM_CHANNEL = 0; // 馬達 A 的 PWM 通道
-const int MOTOR_B_PWM_CHANNEL = 1; // 馬達 B 的 PWM 通道
+// ==== 設定 ==== //
+#define MOTOR_A_IN1 4
+#define MOTOR_A_IN2 5
+#define MOTOR_B_IN3 6
+#define MOTOR_B_IN4 7
 
 // TCRT5000 循線感測器的類比輸入引腳
 const int LEFT_SENSOR_PIN = 0;  // 左邊 TCRT5000 A0 接到 ESP32-C3 的 GPIO4
@@ -62,7 +59,7 @@ const int RIGHT_SENSOR_PIN = 0; // 右邊 TCRT5000 A0 接到 ESP32-C3 的 GPIO3
 const int LED_PIN = 8;
 
 // 動作狀態定義
-enum MotionState { STOPPED, FORWARD, OTHER };
+enum MotionState { STOPPED, FORWARD, BACKWARD, TURN_LEFT, TURN_RIGHT, OTHER };
 MotionState currentMotionState = STOPPED; // 使用不同的變數名避免與 currentControlMode 衝突
 
 unsigned long lastBlinkTime = 0;
@@ -373,68 +370,17 @@ void startSoftAP() {
   Serial.println("Web Server Started! Access at http://" + IP.toString());
 }
 
-void testMotorAForward() {
-  Serial.println("Test Motor A Forward");
-  digitalWrite(5, LOW);             // DIR LOW = 向前？
-  ledcWrite(0, 150);                // PWM 腳：GPIO 4
-  delay(2000);
-  ledcWrite(0, 0);
-}
-
-void testMotorABackward() {
-  Serial.println("Test Motor A Backward");
-  digitalWrite(5, HIGH);            // DIR HIGH = 向後？
-  ledcWrite(0, 150);                // PWM 腳：GPIO 4
-  delay(2000);
-  ledcWrite(0, 0);
-}
-
-void testMotorBForward() {
-  Serial.println("Test Motor B Forward");
-  digitalWrite(7, LOW);             // DIR LOW = 向前？
-  ledcWrite(1, 150);                // PWM 腳：GPIO 6
-  delay(2000);
-  ledcWrite(1, 0);
-}
-
-void testMotorBBackward() {
-  Serial.println("Test Motor B Backward");
-  digitalWrite(7, HIGH);            // DIR HIGH = 向後？
-  ledcWrite(1, 150);                // PWM 腳：GPIO 6
-  delay(2000);
-  ledcWrite(1, 0);
-}
-
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("ESP32-C3 Car Control Starting...");
 
   // --- 馬達與 LED 引腳設定 (確保馬達在 Wi-Fi 連接前是靜止的) ---
-  // 設定 TC1508A 控制引腳為輸出模式
-  pinMode(MOTOR_A_PWM_PIN, OUTPUT);
-  pinMode(MOTOR_A_DIR_PIN, OUTPUT);
-  pinMode(MOTOR_B_PWM_PIN, OUTPUT);
-  pinMode(MOTOR_B_DIR_PIN, OUTPUT);
-
-  // 設定 PWM 通道
-  ledcSetup(MOTOR_A_PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(MOTOR_B_PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
-
-  // 將 PWM 通道與 GPIO 引腳綁定
-  ledcAttachPin(MOTOR_A_PWM_PIN, MOTOR_A_PWM_CHANNEL);
-  ledcAttachPin(MOTOR_B_PWM_PIN, MOTOR_B_PWM_CHANNEL);
-/*
-delay(1000);
-testMotorAForward();
-delay(1000);
-testMotorABackward();
-delay(1000);
-testMotorBForward();
-delay(1000);
-testMotorBBackward();
-delay(1000);
-*/
+  // 設定馬達驅動版的控制引腳為輸出模式
+  pinMode(MOTOR_A_IN1, OUTPUT);
+  pinMode(MOTOR_A_IN2, OUTPUT);
+  pinMode(MOTOR_B_IN3, OUTPUT);
+  pinMode(MOTOR_B_IN4, OUTPUT);
   // **確保馬達在開機時是禁止的**
   stopMotors(); // 將所有馬達相關 PWM 和方向引腳設定為停止狀態
 
@@ -562,61 +508,41 @@ void updateLED() {
 
 // === 馬達動作函式 ===
 void stopMotors() {
-  ledcWrite(MOTOR_A_PWM_CHANNEL, STOP_SPEED); // 將 PWM 工作週期設為 0
-  ledcWrite(MOTOR_B_PWM_CHANNEL, STOP_SPEED);
-  digitalWrite(MOTOR_A_DIR_PIN, LOW); // 確保方向引腳為 LOW (或任何安全狀態)
-  digitalWrite(MOTOR_B_DIR_PIN, LOW);
-  digitalWrite(MOTOR_A_PWM_PIN, LOW);  // IN1
-  digitalWrite(MOTOR_B_PWM_PIN, LOW);  // IN3
-  currentMotionState = STOPPED; // 更新動作狀態
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN3, LOW);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = STOPPED;
 }
 
 void moveForward(int speed) {
-  digitalWrite(MOTOR_A_DIR_PIN, LOW); // 右馬達向前 (請根據實際接線調整高低電位)
-  digitalWrite(MOTOR_B_DIR_PIN, LOW); // 左馬達向前 (請根據實際接線調整高低電位)
-  ledcWrite(MOTOR_B_PWM_CHANNEL, speed);
-  ledcWrite(MOTOR_A_PWM_CHANNEL, speed);
-  currentMotionState = FORWARD; // 更新動作狀態
+  digitalWrite(MOTOR_A_IN1, HIGH);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN3, HIGH);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = FORWARD;
 }
 
 void moveBackward(int speed) {
-/*  
-  testMotorABackward();
-  testMotorBBackward();
-*/  
-  digitalWrite(MOTOR_A_DIR_PIN, HIGH); // 右馬達向後 (方向與向前相反，請根據實際接線調整)
-  digitalWrite(MOTOR_B_DIR_PIN, HIGH); // 左馬達向後 (方向與向前相反，請根據實際接線調整)
-  ledcWrite(MOTOR_A_PWM_CHANNEL, speed);
-  ledcWrite(MOTOR_B_PWM_CHANNEL, speed);
-  currentMotionState = OTHER; // 更新動作狀態 (因為是後退，所以是 OTHER)
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, HIGH);
+  digitalWrite(MOTOR_B_IN3, LOW);
+  digitalWrite(MOTOR_B_IN4, HIGH);
+  currentMotionState = BACKWARD;
 }
 
-// 差速轉向 (原地轉向請修改 DIR_PIN 邏輯)
 void turnLeft(int speed) {
-  digitalWrite(MOTOR_A_DIR_PIN, LOW); // 右馬達向前
-  digitalWrite(MOTOR_B_DIR_PIN, LOW); // 左馬達向前
-  ledcWrite(MOTOR_A_PWM_CHANNEL, speed);          // 右馬達速度
-  ledcWrite(MOTOR_B_PWM_CHANNEL, TURN_SLOW_SPEED); // 左馬達減速
-  currentMotionState = OTHER; // 更新動作狀態 (因為是轉彎，所以是 OTHER)
+  digitalWrite(MOTOR_A_IN1, HIGH);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN3, LOW);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = TURN_LEFT;
 }
 
-// 差速轉向 (原地轉向請修改 DIR_PIN 邏輯)
 void turnRight(int speed) {
-  digitalWrite(MOTOR_A_DIR_PIN, LOW); // 右馬達向前
-  digitalWrite(MOTOR_B_DIR_PIN, LOW); // 左馬達向前
-  ledcWrite(MOTOR_A_PWM_CHANNEL, TURN_SLOW_SPEED); // 右馬達減速
-  ledcWrite(MOTOR_B_PWM_CHANNEL, speed);          // 左馬達速度
-  currentMotionState = OTHER; // 更新動作狀態 (因為是轉彎，所以是 OTHER)
-}
-
-// 函式：讓馬達剎車 (如果 TC1508A 支援此模式，通常是將兩個輸入都設為 HIGH)
-// 此函式目前未使用，但保留供參考
-void brakeMotors() {
-  // 剎車模式通常是將兩個方向引腳都設為 HIGH，並將 PWM 設為最大或 0 (取決於驅動器行為)
-  // 這裡假設將兩個方向引腳都設為 HIGH 即可剎車
-  digitalWrite(MOTOR_A_DIR_PIN, HIGH);
-  digitalWrite(MOTOR_B_DIR_PIN, HIGH);
-  ledcWrite(MOTOR_A_PWM_CHANNEL, 0); // 在剎車時通常會將 PWM 設為 0
-  ledcWrite(MOTOR_B_PWM_CHANNEL, 0);
-  currentMotionState = STOPPED; // 剎車通常視為停止狀態
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN3, HIGH);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = TURN_RIGHT;
 }

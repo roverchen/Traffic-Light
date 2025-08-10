@@ -1,0 +1,538 @@
+#include <Arduino.h>     // 包含 Arduino 核心函式庫
+#include <WiFi.h>        // 包含 Wi-Fi 函式庫
+#include <ESPmDNS.h>     // 包含 mDNS 函式庫，用於透過主機名稱訪問
+#include <WiFiUdp.h>     // 包含 UDP 函式庫，OTA 需要使用
+#include <ArduinoOTA.h>  // 包含 Arduino OTA 函式庫
+#include <WebServer.h>   // 包含網頁伺服器函式庫 (同步式的 WebServer)
+#include <ArduinoJson.h> // 用於處理 JSON 數據，例如發送感測器狀態
+
+// 函式前向宣告 (Function prototypes)
+void stopMotors();
+void moveForward(int speed);
+void moveBackward(int speed);
+void turnLeft(int speed);
+void turnRight(int speed);
+void updateLED(); // LED 狀態更新函式
+void handleCarCommand(char command); // 統一處理車輛指令
+
+// Wi-Fi 設定
+const char* ssid = "chen";     // 替換成您的 Wi-Fi 名稱
+const char* password = "12345678"; // 替換成您的 Wi-Fi 密碼
+const char* ota_hostname = "car-esp32c3"; // OTA 裝置在網路上的名稱
+// const char* ota_password = "admin"; // 如果需要 OTA 密碼，請取消註解並設定
+
+// 控制模式定義
+enum ControlMode {
+  AUTO_CONTROL,   // 自動控制模式 (循線/避障)
+  MANUAL_CONTROL  // 手動控制模式 (網頁指令)
+};
+ControlMode currentControlMode = MANUAL_CONTROL; // 預設為手動控制模式
+
+// 馬達預設速度 (0-255，取決於 PWM_RESOLUTION)
+const int STRAIGHT_SPEED = 200; // 直行速度
+const int TURN_SPEED = 200;     // 轉向時較快的馬達速度 (用於原地轉向或大轉彎)
+const int TURN_SLOW_SPEED = 200; // 轉向時較慢的馬達速度 (用於微調)
+const int STOP_SPEED = 0;       // 停止速度
+/*
+const int STRAIGHT_SPEED = 250; // 直行速度
+const int TURN_SPEED = 200;     // 轉向時較快的馬達速度 (用於原地轉向或大轉彎)
+const int TURN_SLOW_SPEED = 150; // 轉向時較慢的馬達速度 (用於微調)
+const int STOP_SPEED = 0;       // 停止速度
+*/
+// 感測器閾值
+// 此值需要根據您的 TCRT5000 感測器和環境進行校準。
+// 假設讀數低於此閾值表示偵測到障礙物或深色線。
+const int OBSTACLE_THRESHOLD = 300; // 調整此值
+
+// 馬達控制腳位定義
+// ==== 設定 ==== //
+#define MOTOR_SDBY  7
+#define MOTOR_A_IN1 20
+#define MOTOR_A_IN2 21
+#define MOTOR_B_IN3 5
+#define MOTOR_B_IN4 6
+
+// TCRT5000 循線感測器的類比輸入引腳
+const int LEFT_SENSOR_PIN = 0;  // 左邊 TCRT5000 A0 接到 ESP32-C3 的 GPIO4
+const int RIGHT_SENSOR_PIN = 0; // 右邊 TCRT5000 A0 接到 ESP32-C3 的 GPIO3
+
+// 板載 LED 腳位
+const int LED_PIN = 8;
+
+// 動作狀態定義
+enum MotionState { STOPPED, FORWARD, BACKWARD, TURN_LEFT, TURN_RIGHT, OTHER };
+MotionState currentMotionState = STOPPED; // 使用不同的變數名避免與 currentControlMode 衝突
+
+unsigned long lastBlinkTime = 0;
+bool ledState = false;
+
+// 全局旗標，用於追蹤 Wi-Fi 連線狀態
+bool wifiConnected = false;
+
+// 全局變數，用於控制序列埠和網頁感測器顯示的邏輯
+static bool stoppedMessagePrinted = false;
+
+// Web Server 物件
+WebServer server(80); // 網頁伺服器監聽 80 埠
+
+// 統一處理車輛指令的函式
+void handleCarCommand(char command) {
+    String responseMessage = "";
+
+    switch (command) {
+        case 'A': // 切換到自動控制模式
+            currentControlMode = AUTO_CONTROL;
+            responseMessage = "Switched to AUTO_CONTROL mode.";
+            break;
+        case 'M': // 切換到手動控制模式
+            currentControlMode = MANUAL_CONTROL;
+            responseMessage = "Switched to MANUAL_CONTROL mode.";
+            stopMotors(); // 切換模式時停止馬達
+            break;
+        case 'F': // 手動模式：向前
+            if (currentControlMode == MANUAL_CONTROL) {
+                moveForward(STRAIGHT_SPEED);
+                responseMessage = "Moving Forward.";
+            }
+            break;
+        case 'B': // 手動模式：向後
+            if (currentControlMode == MANUAL_CONTROL) {
+                moveBackward(STRAIGHT_SPEED);
+                responseMessage = "Moving Backward.";
+            }
+            break;
+        case 'L': // 手動模式：向左轉
+            if (currentControlMode == MANUAL_CONTROL) {
+                turnLeft(TURN_SPEED);
+                responseMessage = "Turning Left.";
+            }
+            break;
+        case 'R': // 手動模式：向右轉
+            if (currentControlMode == MANUAL_CONTROL) {
+                turnRight(TURN_SPEED);
+                responseMessage = "Turning Right.";
+            }
+            break;
+        case 'S': // 手動模式：停止
+            if (currentControlMode == MANUAL_CONTROL) {
+                stopMotors();
+                responseMessage = "Stopping Motors.";
+            }
+            break;
+        default:
+            responseMessage = "Unknown Command.";
+            break;
+    }
+    Serial.println(responseMessage);
+}
+
+// -------- WiFi 連線 --------
+void connectToWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("🔌 Connecting to WiFi");
+
+  unsigned long startAttemptTime = millis();
+
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 20000) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ WiFi Connected");
+    Serial.print("🌐 IP Address: ");
+    wifiConnected = true; // 設定 Wi-Fi 連線旗標為 true
+    digitalWrite(LED_PIN, LOW); // Wi-Fi 連線成功後，LED 熄滅
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n❌ WiFi Failed");
+    Serial.print("WiFi Status Code: ");
+    Serial.println(WiFi.status());
+  }
+}
+
+// -------- OTA 初始化 --------
+void setupOTA() {
+  ArduinoOTA.setHostname(ota_hostname);
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("🔁 OTA Start");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("✅ OTA End");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("📦 Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("❌ OTA Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+  ArduinoOTA.begin();
+  Serial.println("🆗 OTA Ready.");
+}
+
+void controlByJoystick(int steer, int throttle) {
+  if (abs(throttle) > 20 && abs(steer) <= 20) {
+    // 僅移動
+  } else if (abs(throttle) <= 20 && abs(steer) > 20) {
+    // 僅轉向（原地轉）
+  } else if (abs(throttle) > 20 && abs(steer) > 20) {
+    // 移動+轉向（可考慮實作差速控制）
+  }
+
+  // 舉例邏輯：Y 軸控制前後，X 軸控制方向
+  if (throttle > 20) {
+    moveForward(map(throttle, 0, 100, 0, 255));
+  } else if (throttle < -20) {
+    moveBackward(map(-throttle, 0, 100, 0, 255));
+  } else {
+    stopMotors();
+  }
+
+  if (steer > 20) {
+    turnRight(map(steer, 0, 100, 0, 255));
+  } else if (steer < -20) {
+    turnLeft(map(-steer, 0, 100, 0, 255));
+  }
+}
+
+// -------- Web Server 初始化 --------
+void startWebServer() {
+  // --- 網頁伺服器路由設定 ---
+  // 處理根路徑請求，提供 HTML 控制頁面
+  server.on("/", HTTP_GET, [](){
+    server.sendHeader("Location", "https://physical-ai.tw/tools/remote-joystick");
+    server.send(302, "text/plain", "Redirecting to remote control interface...");
+  });
+
+  // 處理控制指令 (GET 請求)
+  server.on("/control", HTTP_GET, []() {
+    if (server.hasArg("cmd")) {
+      // 原本的簡易指令控制
+      String cmd = server.arg("cmd");
+      handleCarCommand(cmd.charAt(0));
+      server.send(200, "text/plain", "Command received: " + cmd);
+    }
+    else if (server.hasArg("steer") && server.hasArg("throttle")) {
+      int steer = server.arg("steer").toInt();       // -100 ~ 100
+      int throttle = server.arg("throttle").toInt(); // -100 ~ 100
+      controlByJoystick(steer, throttle);
+      server.send(200, "text/plain", "Joystick command received.");
+    } else {
+      server.send(400, "text/plain", "Missing command");
+    }
+  });
+/*
+  server.on("/control", HTTP_GET, [](){
+    if (server.hasArg("cmd")) {
+      String cmd = server.arg("cmd");
+      handleCarCommand(cmd.charAt(0)); // 統一處理指令
+      server.send(200, "text/plain", "Command received: " + cmd);
+    } else {
+      server.send(400, "text/plain", "No command specified");
+    }
+  });
+*/
+  // 處理模式切換指令 (GET 請求)
+  server.on("/mode", HTTP_GET, [](){
+    if (server.hasArg("set")) {
+      String mode = server.arg("set");
+      handleCarCommand(mode.charAt(0)); // 'A' 或 'M'
+      server.send(200, "text/plain", "Mode set to: " + mode);
+    } else {
+      server.send(400, "text/plain", "No mode specified");
+    }
+  });
+
+  // 提供感測器狀態 (JSON 格式)
+  server.on("/status", HTTP_GET, [](){
+    StaticJsonDocument<200> doc; // ArduinoJson 文檔
+    doc["mode"] = (currentControlMode == AUTO_CONTROL) ? "AUTO" : "MANUAL";
+
+    // 建議：即使車子停止，也回傳實時感測器值。前端可以選擇是否顯示。
+    doc["leftSensor"] = analogRead(LEFT_SENSOR_PIN);
+    doc["rightSensor"] = analogRead(RIGHT_SENSOR_PIN);
+    
+  switch (currentMotionState) {
+    case FORWARD: doc["state"] = "FORWARD"; break;
+    case BACKWARD: doc["state"] = "BACKWARD"; break;
+    case TURN_LEFT: doc["state"] = "TURN_LEFT"; break;
+    case TURN_RIGHT: doc["state"] = "TURN_RIGHT"; break;
+    default: doc["state"] = "STOPPED"; break;
+  }
+
+  String jsonResponse;
+    serializeJson(doc, jsonResponse);
+    server.send(200, "application/json", jsonResponse);
+  });
+
+  // 處理未找到的路由
+  server.onNotFound([](){
+    server.send(404, "text/plain", "Not Found");
+  });
+}
+
+void startSoftAP() {
+  const char* ap_ssid = "ESP32-Car-Control";
+  const char* ap_password = "12345678"; // Optional, min 8 chars
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid, ap_password);
+
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);  // Usually 192.168.4.1
+
+  startWebServer();    // Launch your web server here
+  server.begin();
+  Serial.println("Web Server Started! Access at http://" + IP.toString());
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("ESP32-C3 Car Control Starting...");
+
+  // --- 馬達與 LED 引腳設定 (確保馬達在 Wi-Fi 連接前是靜止的) ---
+  // 設定馬達驅動版的控制引腳為輸出模式
+  pinMode(MOTOR_SDBY, OUTPUT);
+  pinMode(MOTOR_A_IN1, OUTPUT);
+  pinMode(MOTOR_A_IN2, OUTPUT);
+  pinMode(MOTOR_B_IN3, OUTPUT);
+  pinMode(MOTOR_B_IN4, OUTPUT);
+  // **確保馬達在開機時是禁止的**
+  stopMotors(); // 將所有馬達相關 PWM 和方向引腳設定為停止狀態
+
+  // LED 腳位設定
+  pinMode(LED_PIN, OUTPUT);
+  // 在 Wi-Fi 連接前，LED 應處於閃爍狀態 (由 loop() 中的 updateLED() 處理)
+  // 此處不需要初始化的 digitalWrite(LED_PIN, HIGH);
+
+  connectToWiFi();
+  setupOTA();
+  startWebServer();
+  server.begin();
+  Serial.println("Web Server Started! Access at http://" + WiFi.localIP().toString());
+
+  // TCRT5000 感測器引腳為類比輸入，通常不需要明確設定 pinMode
+
+}
+
+void loop() {
+  // --- OTA 處理 ---
+  ArduinoOTA.handle();
+
+  // --- 處理網頁客戶端請求 ---
+  server.handleClient();
+
+  // --- 讀取 TCRT5000 感測器數據 ---
+  // 不論馬達狀態如何，都讀取感測器值
+  int leftSensorValue = analogRead(LEFT_SENSOR_PIN);
+  int rightSensorValue = analogRead(RIGHT_SENSOR_PIN);
+
+  // --- 在序列埠監控器顯示狀態訊息 ---
+  // 只有當 Wi-Fi 連接成功後才正常顯示車子狀態
+  if (wifiConnected) {
+    if (currentMotionState != STOPPED) {
+      String statusMessage = "Mode: ";
+      if (currentControlMode == AUTO_CONTROL) {
+        statusMessage += "AUTO";
+      } else {
+        statusMessage += "MANUAL";
+      }
+      statusMessage += "\tL_Sens: " + String(leftSensorValue);
+      statusMessage += "\tR_Sens: " + String(rightSensorValue);
+      Serial.println(statusMessage);
+      stoppedMessagePrinted = false; // 重置旗標，因為車子正在移動
+    } else {
+      if (!stoppedMessagePrinted) {
+        Serial.println("Car is stopped."); // 更簡潔的停止訊息
+        stoppedMessagePrinted = true;
+      }
+      // 停止時不再顯示感測器值，避免刷屏
+    }
+  } else {
+    // Wi-Fi 未連接時，updateLED() 會處理 LED 閃爍，此處無需額外日誌，避免混淆。
+    // 如果需要，可以在這裡打印簡潔的 Wi-Fi 連線進度。
+    if (!stoppedMessagePrinted) {
+      Serial.println("Wi-Fi not connected, motors stopped.");
+      stoppedMessagePrinted = true; // 確保只打印一次
+    }
+  }
+
+  // --- 根據控制模式執行馬達控制邏輯 ---
+  // 只有當 Wi-Fi 連接成功後，才允許馬達執行指令（否則應保持停止）
+  if (wifiConnected) {
+    if (currentControlMode == AUTO_CONTROL) {
+      // 判斷障礙物並控制馬達 (自動模式)
+      if (leftSensorValue < OBSTACLE_THRESHOLD && rightSensorValue < OBSTACLE_THRESHOLD) {
+        // 兩邊都偵測到障礙物 (或在線上)，停止或減速
+        Serial.println("Both obstacles detected - Stopping!");
+        stopMotors();
+      } else if (leftSensorValue < OBSTACLE_THRESHOLD) {
+        // 左邊偵測到障礙物，向右微調
+        Serial.println("Left obstacle detected - Turning right.");
+        turnRight(TURN_SLOW_SPEED); // 使用微調速度
+      } else if (rightSensorValue < OBSTACLE_THRESHOLD) {
+        // 右邊偵測到障礙物，向左微調
+        Serial.println("Right obstacle detected - Turning left.");
+        turnLeft(TURN_SLOW_SPEED); // 使用微調速度
+      } else {
+        // 沒有偵測到障礙物，直行
+        Serial.println("No obstacle - Moving straight.");
+        moveForward(STRAIGHT_SPEED);
+      }
+    }
+  } else {
+    // Wi-Fi 未連接時，確保馬達保持停止狀態
+    stopMotors();
+  }
+
+  // 更新 LED 狀態
+  updateLED();
+
+  delay(50); // 短暫延遲，以便感測器讀取和馬達響應
+}
+
+// === LED 狀態控制函式 ===
+void updateLED() {
+  unsigned long now = millis();
+  unsigned long blinkInterval = 500;
+
+  if (!wifiConnected) {
+    // Wi-Fi 未連接：快速閃爍
+    blinkInterval = 200;
+    if (now - lastBlinkTime >= blinkInterval) {
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState ? LOW : HIGH);
+      lastBlinkTime = now;
+    }
+    return;
+  }
+
+  // Wi-Fi 已連接後，依據動作狀態切換 LED 模式
+  switch (currentMotionState) {
+    case FORWARD:
+    case BACKWARD:
+      digitalWrite(LED_PIN, LOW); // 長亮
+      break;
+    case TURN_LEFT:
+    case TURN_RIGHT:
+      if (now - lastBlinkTime >= blinkInterval) {
+        ledState = !ledState;
+        digitalWrite(LED_PIN, ledState ? LOW : HIGH);
+        lastBlinkTime = now;
+      }
+      break;
+    case STOPPED:
+    default:
+      digitalWrite(LED_PIN, HIGH); // 熄滅（HIGH 表示關閉）
+      break;
+  }
+}
+/*
+void updateLED() {
+  unsigned long now = millis();
+  unsigned long blinkInterval = 500; // 預設閃爍頻率
+
+  if (!wifiConnected) {
+    // Wi-Fi 未連接時，持續閃爍
+    blinkInterval = 200; // Wi-Fi 連接前更快閃爍
+    if (now - lastBlinkTime >= blinkInterval) {
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState ? LOW : HIGH);
+      lastBlinkTime = now;
+    }
+  } else {
+    // Wi-Fi 連接成功後，根據馬達狀態控制 LED
+    if (currentMotionState == FORWARD) {
+      digitalWrite(LED_PIN, LOW); // 前進 → 關燈 (或您希望的指示)
+    } else if (currentMotionState == STOPPED) {
+      digitalWrite(LED_PIN, HIGH); // 停止 → 亮燈 (或您希望的指示)
+    } else { // OTHER (轉彎、後退)
+      // 轉彎、後退 → 閃爍
+      blinkInterval = 500; // 較慢閃爍
+      if (now - lastBlinkTime >= blinkInterval) {
+        ledState = !ledState;
+        digitalWrite(LED_PIN, ledState ? LOW : HIGH);
+        lastBlinkTime = now;
+      }
+    }
+  }
+}
+*/
+// === 馬達動作函式 ===
+void stopMotors() {
+  digitalWrite(MOTOR_SDBY, LOW);
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN3, LOW);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = STOPPED;
+}
+
+void moveForward(int speed) {
+  digitalWrite(MOTOR_SDBY, HIGH);
+  digitalWrite(MOTOR_A_IN1, HIGH);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN3, HIGH);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = FORWARD;
+}
+
+void moveBackward(int speed) {
+  digitalWrite(MOTOR_SDBY, HIGH);
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, HIGH);
+  digitalWrite(MOTOR_B_IN3, LOW);
+  digitalWrite(MOTOR_B_IN4, HIGH);
+  currentMotionState = BACKWARD;
+}
+
+void turnLeft(int speed) {
+  digitalWrite(MOTOR_SDBY, HIGH);
+  // A 靜止
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  // B 左轉方向（根據電路調整方向）
+  digitalWrite(MOTOR_B_IN3, HIGH);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = TURN_LEFT;
+}
+
+void turnRight(int speed) {
+  digitalWrite(MOTOR_SDBY, HIGH);
+  // A 靜止
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  // B 右轉方向（根據電路調整方向）
+  digitalWrite(MOTOR_B_IN3, LOW);
+  digitalWrite(MOTOR_B_IN4, HIGH);
+  currentMotionState = TURN_RIGHT;
+}
+/*
+void turnLeft(int speed) {
+  digitalWrite(MOTOR_SDBY, HIGH);
+  digitalWrite(MOTOR_A_IN1, HIGH);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN3, LOW);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = TURN_LEFT;
+}
+
+void turnRight(int speed) {
+  digitalWrite(MOTOR_SDBY, HIGH);
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN3, HIGH);
+  digitalWrite(MOTOR_B_IN4, LOW);
+  currentMotionState = TURN_RIGHT;
+}
+*/

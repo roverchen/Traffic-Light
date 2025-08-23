@@ -2,12 +2,15 @@
 #include <ArduinoOTA.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
-#include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
+#include <ESPAsyncWebServer.h>
+#include <ESPAsyncWiFiManager.h>
+#include <DNSServer.h>
 
 // === WebSocket & HTTP Server ===
 WebSocketsServer webSocket(81);
 AsyncWebServer server(80);
+DNSServer dns;
 
 // === Motor A (Forward/Backward) ===
 const int motorA_pwm_fwd = 6;
@@ -428,39 +431,9 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 }
 
 void connectToWiFi() {
-  WiFi.persistent(true); // Store credentials in NVS
-  WiFi.mode(WIFI_AP_STA); // Enable both AP and STA
-
-  // Start Access Point immediately
-  const char* apSSID = "ESP32_Control";
-  const char* apPASS = "12345678"; // min. 8 chars if using password
-  WiFi.softAP(apSSID, apPASS);
-  Serial.println("AP started");
-  Serial.print("AP IP address: ");
-  Serial.println(WiFi.softAPIP());
-
-  // Try connecting as station using stored credentials
-  if (WiFi.SSID() != "") {
-    Serial.println("Trying stored WiFi credentials...");
-    WiFi.begin(); // reconnect using saved SSID/password
-  } else {
-    Serial.println("No stored credentials, using defaults...");
-    WiFi.begin("chen", "12345678");
-  }
-
-  unsigned long startAttemptTime = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nSTA connected!");
-    Serial.print("STA IP address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\nSTA connection failed — running AP only");
-  }
+  AsyncWiFiManager wm(&server, &dns);
+  wm.setDebugOutput(true);
+  wm.autoConnect("ESP32-Setup");
 }
 
 void setup() {
